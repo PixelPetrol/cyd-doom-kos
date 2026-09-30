@@ -1,4 +1,4 @@
-// Zmienione dla K-OS 2026-09-24 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): deklaracje DisplayDrawString, DisplayDeinit, InputDeinit.
+// Zmienione dla K-OS 2026-09-24/30 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): deklaracje DisplayDrawString, DisplayDeinit, DisplayMirror, InputDeinit.
 // ESP32-2432S028R (Cheap Yellow Display) port glue.
 #ifndef DOOMPORT_H
 #define DOOMPORT_H
@@ -51,6 +51,8 @@ void DisplayFillRect(int x, int y, int w, int h, unsigned short rgb565);
 void DisplayDrawString(int x, int y, const char* s, int scale, unsigned short fg, unsigned short bg);
 // K-OS: zwolnienie buforow DMA i magistrali przed Z_Init (ekrany K-OS ida PRZED silnikiem).
 void DisplayDeinit(void);
+// K-OS: odbicia obrazu wzgledem rotacji 1 K-OS (MADCTL z /doom/ekran.txt albo kreatora) - dla dotyku.
+void DisplayMirror(int* flipX, int* flipY);
 
 // --- Input (XPT2046 touch, serial keys, BOOT button) ---
 void InputInit(void);

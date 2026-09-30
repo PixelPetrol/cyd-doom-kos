@@ -8,6 +8,9 @@ Uzycie (na komputerze, Python 3.8+, bez dodatkowych bibliotek):
   python3 wad2kos.py --budzet WEJSCIE.wad                  tylko plan: co sie zmiesci
   python3 wad2kos.py WEJSCIE.wad doom.kwad --podglad pasek.png   plus obraz paska stanu
   python3 wad2kos.py --analiza WEJSCIE.wad                 rozbicie pliku na kategorie
+  python3 wad2kos.py WEJSCIE.wad doom.kwad --polowa wszystko  sciany i sprite'y w polowie
+                                  rozdzielczosci poziomej (domyslnie auto: tylko gdy bez tego nie
+                                  miesci sie nawet E1M1 - tak jest z Freedoomem 0.13.0)
 
 Wejscie - IWAD uzytkownika (skrypt niczego nie pobiera):
   * freedoom1.wad  Freedoom: Phase 1, darmowy (BSD-3-Clause), https://freedoom.github.io
@@ -75,6 +78,12 @@ MTF_SKILLS, MTF_NOTSINGLE = 7, 16
 # czarna latka 320x200: nazwa musi byc, bo silnik woluje ja z nazwy i bez niej stanalby z I_Error.
 BLACK_NAMES = ('HELP2', 'CREDIT', 'WIMAP0', 'WIMAP1', 'WIMAP2', 'INTERPIC', 'VICTORY2', 'ENDPIC',
                'PFUB1', 'PFUB2', 'BOSSBACK', 'END0', 'END1', 'END2', 'END3', 'END4', 'END5', 'END6')
+WILV_OTHER = re.compile(r'WILV[1-9]\d')
+# --polowa: poziomy zmniejszania grafiki (share_columns), indeks = src.half.
+HALF_NAMES = ['nie', 'sciany', 'wszystko']
+HALF_TEXT = ['pelna rozdzielczosc grafiki',
+             'latki scian w polowie rozdzielczosci poziomej',
+             'latki scian i sprite\'y w polowie rozdzielczosci poziomej']
 # Lumpy, po ktorych CheckIWAD2 (d_main.c) uznaje dane za TNT/Plutonie - czyli za DOOM II.
 COMMERCIAL_MARKERS = ('MURAL1', 'WFALL1')
 
@@ -1110,13 +1119,29 @@ def prepare(lumps, kind):
     src.m_gamma = Lump('M_GAMMA', text_patch(src.get, 'GAMMA'))
     src.gamma_pals = [Lump(f'PLAYPAL{k}', p) for k, p in enumerate(gamma_palettes(bytes(pp)), 1)]
     src.checked = set()
+    src.slim = {}
+    src.half = 0          # 0 = pelna rozdzielczosc, 1 = polowa: latki scian, 2 = tez sprite'y (--polowa)
     s0, s1 = idx['S_START'], idx['S_END']
     src.sprites = [l for l in lumps[s0 + 1:s1] if not l.name.endswith(('_START', '_END'))]
+    # Rodziny sprite'ow: R_InitSpriteDefs szuka tylko nazw z sprnames (info.c) - inne rodziny
+    # (Freedoom: PLYC, PIST) silnik pomija, wiec nie ma po co ich wozic.
+    src.unknown_spr = {l.name[:4] for l in src.sprites if l.name[:4] not in src.lit}
+    # Latka o nazwie znacznika TNT/Plutonii (Freedoom 0.13: WFALL1, MURAL1 - latki scian) dostaje
+    # w wyniku inna nazwe, i tak samo jej wpis w PNAMES: R_LoadTexture szuka latki po nazwie
+    # z PNAMES, a CheckIWAD2 przestawilby silnik w tryb DOOM II po samej nazwie lumpu.
+    src.pat_rename = {}
+    for mk in COMMERCIAL_MARKERS:
+        if mk in src.pnames:
+            nn = 'KOSP' + mk[:3] + mk[-1]
+            if nn in idx or nn in src.pat_rename.values():
+                raise WadError(f'nie da sie przemianowac latki {mk}: nazwa {nn} jest juz zajeta')
+            src.pat_rename[mk] = nn
     # PNAMES wielkimi literami (GbaWadUtil ProcessPNames)
     pn = src.get('PNAMES')
     n = struct.unpack_from('<I', pn, 0)[0]
     src.pnames_lump = Lump('PNAMES', struct.pack('<I', n) +
-                           b''.join(nm.encode('latin-1').ljust(8, b'\0')[:8] for nm in src.pnames))
+                           b''.join(src.pat_rename.get(nm, nm).encode('latin-1').ljust(8, b'\0')[:8]
+                                    for nm in src.pnames))
     return src
 
 
@@ -1212,15 +1237,16 @@ def assemble(src, keep, gamma=False, no_title=False):
             add('znaczniki', Lump(n, b''))
             continue
         if in_spr:
-            if n[:4] in drop_spr:
+            if n[:4] in drop_spr or n[:4] in src.unknown_spr:
                 continue
             check_patch(src, l)
-            add('sprite', l)
+            add('sprite', slim(src, l, src.half >= 2))
             continue
         if in_pat:
             if n in used_patch:
                 check_patch(src, l)
-                add('latki', l)
+                s = slim(src, l, src.half >= 1)
+                add('latki', Lump(src.pat_rename[n], s.data) if n in src.pat_rename else s)
             continue
         if in_flat:
             # Numer flatu = pozycja miedzy F_START a F_END, a animacje licza zakresy po pozycji -
@@ -1249,6 +1275,11 @@ def assemble(src, keep, gamma=False, no_title=False):
             continue
         if not engine_wants(src, n):
             continue
+        if WILV_OTHER.fullmatch(n) and 'WILV00' in src.idx:
+            # Nazwy plansz E2-E4 na przerywniku: WI_levelNameLump bierze WILV<epizod><mapa>, a gra
+            # zna tylko epizod 1 - nikt ich nie zawola. Nazwa zostaje (alias), tresc nie (~90 kB).
+            add('grafika', Lump(n, b'', alias='WILV00'))
+            continue
         if is_graphic(n):
             # Menu, font HUD-u, przerywnik: V_DrawPatch sprawdza tylko poczatek postu, nie koniec -
             # post dluzszy niz latka pisalby za buforem klatki. Poprawna grafika tego nie ma.
@@ -1276,7 +1307,8 @@ def assemble(src, keep, gamma=False, no_title=False):
             add('palety', Lump(f'PLAYPAL{k}', b'', alias='PLAYPAL'))
     add('menu', src.m_arun)
     add('menu', src.m_gamma)
-    info = (KOSINFO_MAGIC + b'\n' + f'zrodlo={src.kind}\nmapy={",".join(keep)}\npasek=KOSSTBR1\n'.encode())
+    info = (KOSINFO_MAGIC + b'\n' + f'zrodlo={src.kind}\nmapy={",".join(keep)}\npasek=KOSSTBR1\n'
+            f'polowa={HALF_NAMES[src.half]}\n'.encode())
     add('kosinfo', Lump('KOSINFO', info))
     names = {l.name for l in out}
     for mk in COMMERCIAL_MARKERS:
@@ -1288,6 +1320,47 @@ def assemble(src, keep, gamma=False, no_title=False):
     if len(out) > MAX_LUMPS_OUT:
         raise WadError(f'{len(out)} lumpow - silnik przyjmie najwyzej {MAX_LUMPS_OUT}')
     return out, stats, counts, drop_spr
+
+
+def share_columns(d, half):
+    """Latka z kolumnami dzielonymi przez columnofs (format latki na to pozwala: silnik czyta
+    kazda kolumne przez columnofs[x], nic nie zaklada o ich kolejnosci ani unikalnosci).
+    half=False: tylko identyczne kolumny - bez straty. half=True: kolumna 2k+1 pokazuje dane
+    kolumny 2k - polowa rozdzielczosci poziomej (silnik i tak rysuje 120 kolumn na 240 px).
+    Wolac po patch_check (struktura juz sprawdzona). Zwraca bytes albo None, gdy nie ma zysku."""
+    w = struct.unpack_from('<h', d, 0)[0]
+    ofs = struct.unpack_from(f'<{w}I', d, 8)
+    cols = []
+    for o in ofs:
+        p = o
+        while d[p] != 0xFF:
+            p += d[p + 1] + 4
+        cols.append(bytes(d[o:p + 1]))
+    if half:
+        cols = [cols[x & ~1] for x in range(w)]
+    base = 8 + 4 * w
+    where, body, new_ofs = {}, bytearray(), []
+    for c in cols:
+        if c not in where:
+            where[c] = base + len(body)
+            body += c
+        new_ofs.append(where[c])
+    if base + len(body) >= len(d):
+        return None
+    return bytes(d[:8]) + struct.pack(f'<{w}I', *new_ofs) + bytes(body)
+
+
+def slim(src, l, half):
+    """Lump latki/sprite'a po share_columns (wynik zapamietany - plan sklada setki zestawow)."""
+    k = (id(l), half)
+    if k not in src.slim:
+        nd = share_columns(bytes(l.data), half)
+        if nd is None:
+            src.slim[k] = l
+        else:
+            patch_check(nd, l.name)
+            src.slim[k] = Lump(l.name, nd)
+    return src.slim[k]
 
 
 def check_patch(src, l, full=False):
@@ -1428,6 +1501,10 @@ def main(argv=None):
     ap.add_argument('--obraz', help='policz miejsce z obrazu silnika (kos/bin/<plytka>/doom.bin)')
     ap.add_argument('--gamma', action='store_true', help='prawdziwe palety jasnosci PLAYPAL1-5 (+53 760 B)')
     ap.add_argument('--bez-tytulu', action='store_true', help='TITLEPIC na czarno (-~68 kB)')
+    ap.add_argument('--polowa', choices=HALF_NAMES + ['auto'], default='auto',
+                    help='polowa rozdzielczosci poziomej grafiki (silnik i tak rysuje 120 kolumn): nie / '
+                         'sciany (latki scian) / wszystko (tez sprite\'y); auto (domyslnie) = najmniej, '
+                         'przy ktorym miesci sie E1M1')
     ap.add_argument('--budzet', action='store_true', help='tylko policz, co sie zmiesci')
     ap.add_argument('--kolejne', action='store_true',
                     help='zamiast najwiekszej liczby map: najdluzszy ciag E1M1, E1M2, ... bez przeskokow')
@@ -1464,6 +1541,17 @@ def main(argv=None):
     for m in src.order:
         if src.maps[m].problem:
             print(f'  UWAGA {m}: {src.maps[m].problem} - pomijam')
+    if a.polowa == 'auto':
+        # Najmniejsze zmniejszenie, przy ktorym miesci sie choc E1M1 (doom1.wad: zwykle "nie";
+        # Freedoom 0.13 ma duzo wieksza grafike - sama E1M1 z pelna grafika to ~2,8 MB).
+        for lv in range(len(HALF_NAMES)):
+            src.half = lv
+            if kwad_size(assemble(src, ['E1M1'], a.gamma, a.bez_tytulu)[0]) <= cap:
+                break
+    else:
+        src.half = HALF_NAMES.index(a.polowa)
+    print(f'grafika: --polowa {HALF_NAMES[src.half]} ({HALF_TEXT[src.half]})'
+          + (' - wybrane samo' if a.polowa == 'auto' else ''))
 
     if a.budzet:
         print('\nkolejne mapy od E1M1:')
@@ -1487,7 +1575,7 @@ def main(argv=None):
             out = assemble(src, best, a.gamma, a.bez_tytulu)
             print(f'\nplan (najwiecej map): {",".join(best)}  = {fmt(kwad_size(out[0]))} B')
         else:
-            print('\nnawet sama E1M1 sie nie miesci - sprobuj --bez-tytulu')
+            print('\nnawet sama E1M1 sie nie miesci - sprobuj --bez-tytulu albo --polowa wszystko')
         return 0
 
     if not a.wyjscie:
@@ -1514,11 +1602,13 @@ def main(argv=None):
         fit = [k for k, sz in plan_consecutive(src, cap, a.gamma, a.bez_tytulu) if sz <= cap]
         keep = fit[-1] if fit else []
         if not keep:
-            raise WadError(f'nawet sama E1M1 sie nie miesci w {fmt(cap)} B - sprobuj --bez-tytulu')
+            raise WadError(f'nawet sama E1M1 sie nie miesci w {fmt(cap)} B - sprobuj --bez-tytulu '
+                           'albo --polowa wszystko')
     else:
         keep = plan_max(src, cap, a.gamma, a.bez_tytulu)
         if not keep:
-            raise WadError(f'nawet sama E1M1 sie nie miesci w {fmt(cap)} B - sprobuj --bez-tytulu')
+            raise WadError(f'nawet sama E1M1 sie nie miesci w {fmt(cap)} B - sprobuj --bez-tytulu '
+                           'albo --polowa wszystko')
     out, stats, counts, drop = assemble(src, keep, a.gamma, a.bez_tytulu)
     report(src, keep, out, stats, counts, drop, cap)
     if a.lista:

@@ -1,4 +1,4 @@
-// Zmienione dla K-OS 2026-09-24 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): profil panelu K-OS (MADCTL/INVON), jasnosc PWM, napisy 5x7, DisplayDeinit, pin podswietlenia per plytka.
+// Zmienione dla K-OS 2026-09-24/30 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): profil panelu K-OS (MADCTL/INVON, pelny init jak TFT_eSPI, MADCTL sprawdzany po przywroceniu, nadpisanie z /doom/ekran.txt), jasnosc PWM, napisy 5x7, DisplayDeinit, pin podswietlenia per plytka, oczekiwanie na DMA z limitem.
 // ILI9341/ST7789 SPI display driver for the CYD (ESP32-2432S028R).
 //
 // The engine renders 240x160 in 8bpp (as 120x160 uint16 with each byte a
@@ -43,21 +43,39 @@
 #define ROWS_PER_CHUNK 8
 #define CHUNK_BYTES (OUT_W * ROWS_PER_CHUNK * 2)
 
-// K-OS: poziom = DOKLADNIE rotacja 1 z TFT_eSPI dla danego panelu. Tylko wtedy kalibracja
-// dotyku zrobiona w K-OS (rotacja 0) przelicza sie na poziom wzorem z input.cpp - ten sam
-// wzor, ktorego uzywa tom gier (gry/gry/engine.cpp, rawToScreen). Upstream mial tu 0x60 i
-// obowiazkowy kreator przy pierwszym starcie; pod K-OS kreator jest tylko awaryjny (BOOT).
+// K-OS: poziom = DOKLADNIE rotacja 1 z TFT_eSPI dla danego panelu (ILI9341: MV|BGR = 0x28,
+// ST7789 z TFT_RGB_ORDER=TFT_BGR: MX|MV|BGR = 0x68) - tak rysuja poziomo SkyCYD i gry K-OS,
+// sprawdzone na cyd24. Tylko wtedy kalibracja dotyku zrobiona w K-OS (rotacja 0) przelicza sie
+// na poziom wzorem z input.cpp (gry/gry/engine.cpp, rawToScreen). Upstream mial tu 0x60
+// i obowiazkowy kreator; pod K-OS kreator jest tylko awaryjny (BOOT).
+// 0.1.1: panel dostaje TEN SAM pelny init co w K-OS (TFT_eSPI ILI9341_2_DRIVER / ST7789_DRIVER),
+// a nie tylko reset programowy + MADCTL - wtedy MADCTL znaczy dokladnie to samo co w K-OS.
+// Kolejnosc waznosci MADCTL: /doom/ekran.txt (madctl=0x..) > kreator (BOOT) > profil plytki.
 // Odwrocenie kolorow: K-OS inicjuje ILI9341 z TFT_INVERSION_ON, a ST7789 z TFT_INVERSION_OFF
 // (ST7789_Init.h w TFT_eSPI wysyla INVON bezwarunkowo - stad jawne OFF w K-OS). Ustawienie
 // "odwrocenie" z K-OS odwraca ten stan, dokladnie jak applyTheme() w ladowarce.
 #if defined(CYD_PANEL_ST7789)
 #define KOS_MADCTL_LAND 0x68   // MX|MV|BGR (K-OS buduje ST7789 z TFT_RGB_ORDER=TFT_BGR)
 #define KOS_PANEL_INVON 0
+#define KOS_PANEL_NAME "ST7789"
 #else
 #define KOS_MADCTL_LAND 0x28   // MV|BGR
 #define KOS_PANEL_INVON 1
+#define KOS_PANEL_NAME "ILI9341"
 #endif
-#define MADCTL_LANDSCAPE (g_dispCfg.magic == DISPCFG_MAGIC ? g_dispCfg.madctl : KOS_MADCTL_LAND)
+static unsigned char madctlLand(void)
+{
+    if (g_kos.madctl) return g_kos.madctl;
+    if (g_dispCfg.magic == DISPCFG_MAGIC) return g_dispCfg.madctl;
+    return KOS_MADCTL_LAND;
+}
+static const char* madctlSource(void)
+{
+    if (g_kos.madctl) return "plik /doom/ekran.txt";
+    if (g_dispCfg.magic == DISPCFG_MAGIC) return "kreator (BOOT)";
+    return "profil plytki = rotacja 1 K-OS";
+}
+#define MADCTL_LANDSCAPE madctlLand()
 #define COLMOD_16BPP     0x55
 
 static spi_device_handle_t s_spi;
@@ -149,7 +167,50 @@ static bool bitsContainByte(uint32_t v, int bits, uint8_t want)
     return false;
 }
 
-// Full panel init, bit-banged: slow but unconditionally reliable.
+// Pelny init panelu bit-bangiem - wolno, ale bez zaleznosci od sterownika SPI. Sekwencje sa
+// przepisane z TFT_eSPI (TFT_Drivers/ILI9341_Init.h galaz ILI9341_2_DRIVER i ST7789_Init.h),
+// ktorym K-OS i jego programy (SkyCYD, gry) inicjuja ten sam panel. Upstream robil tylko reset
+// programowy + MADCTL, a stan pozostalych rejestrow (np. B6h - kierunek skanowania) zalezal
+// wtedy od panelu i od tego, co zostawil poprzedni program.
+typedef struct { uint8_t cmd, n; uint8_t d[15]; } panel_cmd_t;
+#if defined(CYD_PANEL_ST7789)
+static const panel_cmd_t kPanelInit[] = {
+    { 0x13, 0, {0} },                                   // NORON
+    { 0xB6, 2, {0x0A, 0x82} },
+    { 0xB0, 2, {0x00, 0xE0} },                          // RAMCTRL
+    { 0xB2, 5, {0x0C, 0x0C, 0x00, 0x33, 0x33} },        // PORCTRL
+    { 0xB7, 1, {0x35} },                                // GCTRL
+    { 0xBB, 1, {0x28} },                                // VCOMS
+    { 0xC0, 1, {0x0C} },                                // LCMCTRL
+    { 0xC2, 2, {0x01, 0xFF} },                          // VDVVRHEN
+    { 0xC3, 1, {0x10} },                                // VRHS
+    { 0xC4, 1, {0x20} },                                // VDVSET
+    { 0xC6, 1, {0x0F} },                                // FRCTR2
+    { 0xD0, 2, {0xA4, 0xA1} },                          // PWCTRL1
+    { 0xE0, 14, {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x32, 0x44, 0x42, 0x06, 0x0E, 0x12, 0x14, 0x17} },
+    { 0xE1, 14, {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x31, 0x54, 0x47, 0x0E, 0x1C, 0x17, 0x1B, 0x1E} },
+};
+#else
+static const panel_cmd_t kPanelInit[] = {
+    { 0xCF, 3, {0x00, 0xC1, 0x30} },
+    { 0xED, 4, {0x64, 0x03, 0x12, 0x81} },
+    { 0xE8, 3, {0x85, 0x00, 0x78} },
+    { 0xCB, 5, {0x39, 0x2C, 0x00, 0x34, 0x02} },
+    { 0xF7, 1, {0x20} },
+    { 0xEA, 2, {0x00, 0x00} },
+    { 0xC0, 1, {0x10} },                                // PWCTR1
+    { 0xC1, 1, {0x00} },                                // PWCTR2
+    { 0xC5, 2, {0x30, 0x30} },                          // VMCTR1
+    { 0xC7, 1, {0xB7} },                                // VMCTR2
+    { 0xB1, 2, {0x00, 0x1A} },                          // FRMCTR1
+    { 0xB6, 3, {0x08, 0x82, 0x27} },                    // DFUNCTR: GS=0, SS=0 jak w K-OS
+    { 0xF2, 1, {0x00} },
+    { 0x26, 1, {0x01} },
+    { 0xE0, 15, {0x0F, 0x2A, 0x28, 0x08, 0x0E, 0x08, 0x54, 0xA9, 0x43, 0x0A, 0x0F, 0x00, 0x00, 0x00, 0x00} },
+    { 0xE1, 15, {0x00, 0x15, 0x17, 0x07, 0x11, 0x06, 0x2B, 0x56, 0x3C, 0x05, 0x10, 0x0F, 0x3F, 0x3F, 0x0F} },
+};
+#endif
+
 static void bbPanelInit(void)
 {
     digitalWrite(PIN_TFT_CS, LOW);
@@ -160,6 +221,9 @@ static void bbPanelInit(void)
     bbCmd(0x11);                  // sleep out (config is ignored while asleep)
     digitalWrite(PIN_TFT_CS, HIGH);
     delay(120);
+
+    for (unsigned i = 0; i < sizeof(kPanelInit) / sizeof(kPanelInit[0]); i++)
+        bbCmdData(kPanelInit[i].cmd, kPanelInit[i].d, kPanelInit[i].n);
 
     bbCmd1(0x36, MADCTL_LANDSCAPE);
     bbCmd1(0x3A, COLMOD_16BPP);
@@ -228,7 +292,12 @@ static void waitChunk(int i)
 {
     if (s_chunkInFlight[i]) {
         spi_transaction_t* r;
-        spi_device_get_trans_result(s_spi, &r, portMAX_DELAY);
+        // Z limitem zamiast portMAX_DELAY: paczka, ktora nie wraca, to byla cicha, wieczna petla
+        // (tak wygladalo 0.1.0 na cyd24: ekran, a potem cisza). Teraz slad w logu i dalej.
+        static uint32_t lost = 0;
+        if (spi_device_get_trans_result(s_spi, &r, pdMS_TO_TICKS(1000)) != ESP_OK) {
+            if (lost++ < 5) printf("[lcd] paczka DMA %d nie wrocila w 1 s (%u. raz)\n", i, (unsigned)lost);
+        }
         s_chunkInFlight[i] = false;
     }
 }
@@ -463,6 +532,8 @@ void DisplayInit(void)
     bbPinSetup();
     bbPanelInit();
     uint32_t rb = bbReadReg(0x0B, 16);
+    printf("[lcd] panel %s (%s), MADCTL=0x%02x (%s), INV%s\n", KOS_PANEL_NAME, KOS_BOARD_ID,
+           MADCTL_LANDSCAPE, madctlSource(), (KOS_PANEL_INVON ^ (g_kos.invert ? 1 : 0)) ? "ON" : "OFF");
     printf("[lcd] bit-bang init: MADCTL readback=0x%04x (%s)\n", (unsigned)rb,
            bitsContainByte(rb, 16, MADCTL_LANDSCAPE) ? "ok" : "UNEXPECTED");
 
@@ -491,14 +562,37 @@ void DisplayInit(void)
         chosen = 2;
         printf("[lcd] hw spi failed at all speeds - limping at 2 MHz\n");
     }
+    // 0.1.1: przywrocenie MADCTL po tescie predkosci SPRAWDZONE odczytem. W 0.1.0 zostawal tu
+    // tylko zapis bez odczytu - gdyby sie nie przyjal, panel zostalby z wartoscia testowa
+    // (0x68 na ILI9341 = obraz odbity wzgledem K-OS).
+    uint32_t after = 0;
+    for (int k = 0; k < 3; k++) {
+        bbCmd1(0x36, MADCTL_LANDSCAPE);
+        after = bbReadReg(0x0B, 16);
+        if (bitsContainByte(after, 16, MADCTL_LANDSCAPE)) break;
+    }
+    printf("[lcd] MADCTL po tescie=0x%04x (%s)\n", (unsigned)after,
+           bitsContainByte(after, 16, MADCTL_LANDSCAPE) ? "ok" : "NIE PRZYJETY");
     printf("[lcd] using %d MHz\n", chosen);
 
     busInit(chosen * 1000 * 1000);
     gpio_set_direction((gpio_num_t)PIN_TFT_DC, GPIO_MODE_OUTPUT);
     dc(1);
+    cmdData1(0x36, MADCTL_LANDSCAPE);   // i jeszcze raz sprzetowym SPI, na wszelki wypadek
 
     fillScreenBlack();
     backlight(1);
+    printf("[lcd] ekran gotowy\n");
+}
+
+// Odbicia obrazu wzgledem rotacji 1 K-OS - dotyk (input.cpp) musi odbic sie tak samo.
+// W trybie MV: MY odwraca kolejnosc wierszy panelu = os x obrazu (320), MX - kolumn = os y (240).
+// Na obu panelach MX to kolumna fizyczna (ILI9341 = ST7789 z odwrotnym MX we wszystkich rotacjach).
+void DisplayMirror(int* flipX, int* flipY)
+{
+    unsigned char d = (unsigned char)(madctlLand() ^ KOS_MADCTL_LAND);
+    *flipX = (d & 0x80) ? 1 : 0;
+    *flipY = (d & 0x40) ? 1 : 0;
 }
 
 void DisplayDeinit(void)

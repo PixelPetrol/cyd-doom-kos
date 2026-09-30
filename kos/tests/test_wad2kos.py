@@ -591,8 +591,83 @@ def test_bad_inputs():
     check(by['PLAYA1'][0] == by['PLAYB1'][0], 'identyczne sprite\'y w jednym miejscu')
 
 
+def test_polowa():
+    # share_columns: bez straty (identyczne kolumny) i polowa rozdzielczosci poziomej
+    stripes = pat(64, 128, fn=lambda x, y: (x // 2) % 7 + 1)          # pary identycznych kolumn
+    d = w.share_columns(stripes, False)
+    check(d is not None and len(d) < len(stripes) * 0.6, 'identyczne kolumny dziela dane')
+    check(w.patch_decode(d, 'S')[4] == w.patch_decode(stripes, 'S')[4], 'dzielenie kolumn bez straty')
+    grad = pat(64, 128, fn=lambda x, y: (x * 3 + y) % 250)            # kazda kolumna inna
+    check(w.share_columns(grad, False) is None, 'bez identycznych kolumn - bez zmian')
+    h = w.share_columns(grad, True)
+    oc, hc = w.patch_decode(grad, 'G')[4], w.patch_decode(h, 'G')[4]
+    check(all(hc[x] == oc[x & ~1] for x in range(64)), 'polowa: kolumna 2k+1 = kolumna 2k')
+    check(len(h) < len(grad) * 0.6 and w.patch_check(h, 'G')[:2] == (64, 128), 'polowa: mniej danych, te same wymiary')
+    odd = pat(5, 9, fn=lambda x, y: x + 1 if y % 3 else None)          # nieparzysta szerokosc, dziury
+    ho = w.share_columns(odd, True)
+    check(ho is not None and w.patch_decode(ho, 'O')[4][4] == w.patch_decode(odd, 'O')[4][4],
+          'polowa: ostatnia kolumna nieparzystej latki zostaje')
+
+    # w wyniku: poziomy nie / sciany / wszystko, silnik przyjmuje kazdy plik
+    def wide(L):
+        return [(n, pat(64, 128, fn=lambda x, y, k=(n == 'TROOA1'): (x * 5 + y + k) % 240)
+                 if n in ('P_WALL1', 'TROOA1') else d) for n, d in L]
+    src = load(make_iwad('shareware', edit=wide), 'polowa.wad')
+    sizes = []
+    for lv in range(3):
+        src.half = lv
+        out = w.assemble(src, ['E1M1'])[0]
+        blob = w.kwad_bytes(out)
+        check(engine_accepts(blob) == [], f'--polowa {w.HALF_NAMES[lv]}: silnik przyjmie plik')
+        by = {l.name: l for l in out}
+        for n in ('P_WALL1', 'TROOA1'):
+            w.patch_check(bytes(by[n].data), n)
+        check(f'polowa={w.HALF_NAMES[lv]}'.encode() in blob, f'KOSINFO: polowa={w.HALF_NAMES[lv]}')
+        sizes.append((len(by['P_WALL1'].data), len(by['TROOA1'].data)))
+    check(sizes[1][0] < sizes[0][0] and sizes[1][1] == sizes[0][1], f'sciany: tylko latki mniejsze {sizes}')
+    check(sizes[2][1] < sizes[1][1], f'wszystko: sprite tez mniejszy {sizes}')
+
+    # rodzina sprite'ow nieznana silnikowi (Freedoom: PLYC) - wycieta; WILV E2-E4 - alias WILV00
+    def extra(L):
+        i = [n for n, _ in L].index('S_END')
+        L = L[:i] + [('PLYCA1', pat(8, 8))] + L[i:]
+        return L + [('WILV00', pat(40, 10, 9)), ('WILV01', pat(40, 10, 8)), ('WILV12', pat(40, 10, 7)),
+                    ('WILV38', pat(40, 10, 6))]
+    s = load(make_iwad('freedoom', edit=extra), 'freedoom1.wad')
+    out = w.assemble(s, ['E1M1'])[0]
+    names = {l.name: l for l in out}
+    check('PLYCA1' not in names and 'PLAYA1' in names, 'PLYC wyciety, PLAY zostaje')
+    check(names.get('WILV12') and names['WILV12'].alias == 'WILV00' and names['WILV38'].alias == 'WILV00'
+          and not names['WILV01'].alias, 'WILV1x-3x: alias WILV00, WILV0x zostaja')
+    check(engine_accepts(w.kwad_bytes(out)) == [], 'plik z aliasami WILV przyjety')
+
+    # latka scian o nazwie znacznika Plutonii (Freedoom 0.13: WFALL1) - nowa nazwa w lumpie i PNAMES
+    def wfall_patch(L):
+        L = [(n, (struct.pack('<I', 7) + b''.join(p.ljust(8, b'\0') for p in
+                  [b'WFALL1', b'P_WALL2', b'P_SKY1', b'P_SW1', b'P_STINK', b'P_WALL3', b'P_NOPE']))
+              if n == 'PNAMES' else d) for n, d in L]
+        return [('WFALL1' if n == 'P_WALL1' else n, d) for n, d in L]
+    s = load(make_iwad('shareware', edit=wfall_patch))
+    out = w.assemble(s, ['E1M1'])[0]
+    names = [l.name for l in out]
+    pn = [l for l in out if l.name == 'PNAMES'][0].data
+    check('WFALL1' not in names and 'KOSPWFA1' in names, 'latka WFALL1 przemianowana na KOSPWFA1')
+    check(bytes(pn[4:12]).rstrip(b'\0') == b'KOSPWFA1' and b'WFALL1' not in bytes(pn), 'PNAMES wskazuje nowa nazwe')
+
+    # CLI: auto wybiera najmniejszy poziom, przy ktorym miesci sie E1M1
+    p = save('polowa-cli.wad', make_iwad('shareware', edit=wide))
+    full = w.kwad_size(w.assemble(load(make_iwad('shareware', edit=wide)), ['E1M1'])[0])
+    r = subprocess.run([sys.executable, os.path.join(HERE, '..', 'wad2kos.py'), '--budzet', p,
+                        '--limit', str(full - 1)], capture_output=True, text=True)
+    check(r.returncode == 0 and '--polowa sciany' in r.stdout and 'wybrane samo' in r.stdout,
+          f'auto: przy braku miejsca polowa scian ({r.stdout[-300:]} {r.stderr})')
+    r = subprocess.run([sys.executable, os.path.join(HERE, '..', 'wad2kos.py'), '--budzet', p],
+                       capture_output=True, text=True)
+    check(r.returncode == 0 and '--polowa nie' in r.stdout, 'auto: gdy sie miesci - pelna grafika')
+
+
 def main():
-    for t in (test_basics, test_shareware, test_freedoom, test_plan, test_cli, test_bad_inputs):
+    for t in (test_basics, test_shareware, test_freedoom, test_plan, test_cli, test_bad_inputs, test_polowa):
         try:
             t()
         except Exception as e:      # noqa: BLE001

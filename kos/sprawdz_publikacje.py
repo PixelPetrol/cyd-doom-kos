@@ -26,7 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Pliki spoza src/ i include/ podane z nazwy; src/ i include/ - cale katalogi (patrz files()).
 EXTRA = [
     'LICENSE', 'README.md', 'README-KOS.md', '.gitignore',
-    'kos/build.sh', 'kos/wad2kos.py', 'kos/tests/test_wad2kos.py', 'kos/INSTRUKCJA.md',
+    'kos/build.sh', 'kos/wad2kos.py', 'kos/tests/test_wad2kos.py', 'kos/tests/test_silnik_host.py',
+    'kos/tests/silnik_host.c', 'kos/INSTRUKCJA.md',
     'kos/SKLEP.md', 'kos/PUBLIKACJA.md', 'kos/sprawdz_publikacje.py',
 ]
 DIRS = [('include', ('.h',)), ('src/doom', ('.c', '.h')), ('src/port', ('.c', '.cpp', '.h'))]

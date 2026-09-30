@@ -11,9 +11,9 @@ Zrodlem prawdy listy jest `kos/sprawdz_publikacje.py` (EXTRA + cale `include/`, 
 | co | pliki |
 |---|---|
 | licencja i opis | `LICENSE` (GNU GPL 2.0, tekst z upstreamu), `README.md` (upstream + baner K-OS, naglowek zmian), `README-KOS.md`, `.gitignore` |
-| narzedzia K-OS | `kos/build.sh`, `kos/wad2kos.py`, `kos/tests/test_wad2kos.py`, `kos/sprawdz_publikacje.py` |
+| narzedzia K-OS | `kos/build.sh`, `kos/wad2kos.py`, `kos/tests/test_wad2kos.py`, `kos/tests/test_silnik_host.py`, `kos/tests/silnik_host.c`, `kos/sprawdz_publikacje.py` |
 | dokumenty K-OS | `kos/INSTRUKCJA.md`, `kos/SKLEP.md`, `kos/PUBLIKACJA.md` |
-| silnik | `include/*.h` (71), `src/doom/*.c` (56), `src/port/*` (13) - razem z plikami wyzej 151 plikow |
+| silnik | `include/*.h` (71), `src/doom/*.c` (56), `src/port/*` (13) - razem z plikami wyzej 153 pliki (od 0.1.1) |
 
 Celowo POMINIETE (nie sa potrzebne do zbudowania obrazu, GPL-2.0 par. 3 tego nie wymaga):
 
@@ -63,6 +63,18 @@ git push -u origin main --tags
 
 W opisie repozytorium na GitHubie: "DOOM (GBADoom/PrBoom) as a K-OS program for ESP32 CYD boards -
 BETA, engine only, game data not included. GPL-2.0. Based on HenrysCat/cyd-doom."
+
+## Kolejne wydanie (np. 0.1.1-beta) w istniejacym repo
+
+```
+cd "porty/cyd-doom"
+python3 kos/sprawdz_publikacje.py --kopiuj /tmp/nowe      # pusty katalog
+rsync -a --delete --exclude .git /tmp/nowe/ /sciezka/cyd-doom-kos/
+cd /sciezka/cyd-doom-kos && git add -A && python3 kos/sprawdz_publikacje.py --repo .
+git commit -m "DOOM dla K-OS 0.1.1-beta: ..."
+./kos/build.sh all       # SHA-256 = kos/SKLEP.md
+git tag kos-0.1.1-beta && git push origin main --tags
+```
 
 ## Obraz a zrodlo
 

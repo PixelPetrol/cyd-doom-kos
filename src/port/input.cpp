@@ -1,4 +1,4 @@
-// Zmienione dla K-OS 2026-09-24 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): odczyt XPT2046 jak w K-OS (2.8" bit-bang, 2.4" na magistrali ekranu), kalibracja z K-OS.
+// Zmienione dla K-OS 2026-09-24/30 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): odczyt XPT2046 jak w K-OS (2.8" bit-bang, 2.4" na magistrali ekranu), kalibracja z K-OS, dotyk odbity razem z obrazem (MADCTL z /doom/ekran.txt).
 // Input for the CYD port: XPT2046 resistive touch (bit-banged), serial
 // keyboard fallback, and the BOOT button.
 //
@@ -161,6 +161,11 @@ static void kosRawToLand(int rx, int ry, int* ox, int* oy)
 #else
     *ox = yy; *oy = 239 - xx;
 #endif
+    // Obraz odbity MADCTL-em z /doom/ekran.txt (albo kreatora) - dotyk odbija sie tak samo.
+    int fx, fy;
+    DisplayMirror(&fx, &fy);
+    if (fx) *ox = 319 - *ox;
+    if (fy) *oy = 239 - *oy;
 }
 
 int InputBootPressed(void)

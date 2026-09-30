@@ -1,4 +1,4 @@
-// Zmienione dla K-OS 2026-09-24 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): I_Error na ekranie i powrot do K-OS.
+// Zmienione dla K-OS 2026-09-24/30 (galaz kos, na bazie HenrysCat/cyd-doom 1c58bf4, GPL-2.0): I_Error na ekranie i powrot do K-OS, koniec logu etapow na pierwszej klatce.
 // ESP32 implementation of GBADoom's i_system_e32 platform API.
 #include <Arduino.h>
 #include <stdarg.h>
@@ -66,6 +66,13 @@ void I_FinishUpdate_e32(const byte* srcBuffer, const byte* pallete,
     if (srcBuffer)
         DisplayPushFrame(srcBuffer);
 
+    static bool first = true;
+    if (first) {
+        first = false;
+        KosStage(nullptr);   // koniec logu etapow startu - silnik rysuje
+        printf("[doom] pierwsza klatka - silnik dziala (sterta %u B)\n", (unsigned)esp_get_free_heap_size());
+    }
+
     // Periodic status over serial: frame rate + memory health.
     static uint32_t frames = 0;
     static uint32_t lastReport = 0;
@@ -115,6 +122,7 @@ void I_Error(const char* error, ...)
     vsnprintf(msg, sizeof(msg), error, v);
     va_end(v);
 
+    KosStage("I_Error na ekranie - czekam na dotyk albo BOOT");
     printf("\nI_Error: %s\n", msg);
     fflush(stdout);
     DisplayDrawText(msg);

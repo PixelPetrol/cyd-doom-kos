@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 // Wersja programu w sklepie K-OS i tag zrodel w publicznym repozytorium (kos-<wersja>).
-#define KOS_DOOM_WERSJA "0.1.0-beta"
+#define KOS_DOOM_WERSJA "0.1.1-beta"
 
 // Plik z danymi gry przygotowany na komputerze skryptem kos/wad2kos.py.
 #define KOS_DATA_PATH  "/sd/doom/doom.kwad"
@@ -43,6 +43,7 @@ typedef struct {
     uint16_t cal[5];
     uint8_t  calFromCard;   // 1 = z karty, 0 = domyslna z kos_board.h
     uint8_t  sdOk;          // karta byla przy starcie
+    uint8_t  madctl;        // 0 = z profilu plytki; inaczej MADCTL z /sd/doom/ekran.txt (tylko z bitem MV)
 } kos_cfg_t;
 
 extern kos_cfg_t g_kos;
@@ -68,6 +69,11 @@ void KosDataWhere(uint32_t* offset, uint32_t* length);
 int KosSaveLoad(unsigned char* buf, unsigned int size);
 int KosSaveStore(const unsigned char* buf, unsigned int size);
 extern int g_kosSaveFailed;   // ostatni zapis nieudany - g_game.c pokazuje to graczowi
+
+// Etap startu do logu: co 3 s na Serial wiersz "[doom] etap: ..." (z postepem, gdy total > 0),
+// zeby zadne czekanie przed pierwsza klatka nie bylo cisza. KosStage(NULL) wylacza (pierwsza klatka).
+void KosStage(const char* name);
+void KosStageProgress(uint32_t done, uint32_t total);
 
 // Powrot do K-OS (Model B: otadata skasowana, wiec restart = menu K-OS).
 void KosExitToMenu(void);

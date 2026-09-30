@@ -12,6 +12,7 @@
 #include <esp_flash_internal.h>
 #include <esp_rom_crc.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <spi_flash_mmap.h>
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -67,6 +68,51 @@ static uint32_t s_dataOff = 0, s_dataLen = 0;
 static bool s_ui = false;
 static bool s_boot = false;   // miedzy KosPrepare a KosPrepareDone karta jest juz sprawdzona
 static uint32_t s_mountFailAt = 0;   // ostatnie nieudane montowanie w trakcie gry
+
+// =======================================================================================
+// Etap startu w logu (0.1.1). W 0.1.0 po "[lcd] using 40 MHz" bywala minuta ciszy: ekrany
+// K-OS czekaly na dotyk bez slowa na Serial, a kopia danych pisala dopiero na koncu. Teraz
+// esp_timer co 3 s mowi, gdzie program jest i ile zrobil - kazde czekanie widac w logu.
+// =======================================================================================
+static const char* volatile s_stage = nullptr;
+static volatile uint32_t s_stageAt = 0, s_stageDone = 0, s_stageTotal = 0;
+static esp_timer_handle_t s_stageTimer = nullptr;
+
+static void stageTick(void*)
+{
+    const char* st = s_stage;
+    if (!st) return;
+    uint32_t t = (millis() - s_stageAt) / 1000;
+    if (s_stageTotal)
+        Serial.printf("[doom] etap: %s (%u s) %u / %u B\n", st, (unsigned)t, (unsigned)s_stageDone, (unsigned)s_stageTotal);
+    else
+        Serial.printf("[doom] etap: %s (%u s)\n", st, (unsigned)t);
+}
+
+extern "C" void KosStage(const char* name)
+{
+    if (!name) {
+        if (s_stageTimer) { esp_timer_stop(s_stageTimer); esp_timer_delete(s_stageTimer); s_stageTimer = nullptr; }
+        s_stage = nullptr;
+        return;
+    }
+    s_stageDone = s_stageTotal = 0;
+    s_stageAt = millis();
+    s_stage = name;
+    Serial.printf("[doom] etap: %s\n", name);
+    if (!s_stageTimer) {
+        esp_timer_create_args_t a = {};
+        a.callback = stageTick;
+        a.name = "doometap";
+        if (esp_timer_create(&a, &s_stageTimer) == ESP_OK) esp_timer_start_periodic(s_stageTimer, 3000000);
+        else s_stageTimer = nullptr;
+    }
+}
+
+extern "C" void KosStageProgress(uint32_t done, uint32_t total)
+{
+    s_stageDone = done; s_stageTotal = total;
+}
 
 // =======================================================================================
 // Model B
@@ -215,6 +261,28 @@ static void touchCalLoad(void)
 }
 
 // =======================================================================================
+// /sd/doom/ekran.txt - reczne ustawienie orientacji obrazu, bez przebudowy programu.
+// Jedna linia "madctl=0xNN" (tylko wartosci poziome - z bitem MV 0x20). Dotyk odbija sie razem
+// z obrazem (input.cpp). Przyklady dla ILI9341 (cyd24/cyd28; domyslnie 0x28):
+//   0xA8 = odbicie lewo-prawo, 0x68 = odbicie gora-dol, 0xE8 = obrot o 180 stopni.
+// =======================================================================================
+static void ekranLoad(void)
+{
+    g_kos.madctl = 0;
+    FILE* f = fopen("/sd/doom/ekran.txt", "r");
+    if (!f) return;
+    char line[96];
+    while (readLine(f, line, sizeof(line))) {
+        if (line[0] == '#' || strncmp(line, "madctl=", 7)) continue;
+        long v = strtol(line + 7, nullptr, 0);
+        if (v > 0 && v < 256 && (v & 0x20)) g_kos.madctl = (uint8_t)v;
+        else Serial.printf("EKRAN: madctl=%s odrzucone (potrzebny bit MV 0x20, np. 0x28 0xA8 0x68 0xE8)\n", line + 7);
+    }
+    fclose(f);
+    if (g_kos.madctl) Serial.printf("EKRAN: MADCTL 0x%02x z /doom/ekran.txt\n", g_kos.madctl);
+}
+
+// =======================================================================================
 // Ekrany (320x240, font 5x7)
 // =======================================================================================
 static void uiBegin(void)
@@ -256,14 +324,27 @@ static void uiBar(int y, uint32_t done, uint32_t total)
     if (w > 2) DisplayFillRect(21, y + 1, w - 2, 10, g_kos.acc);
 }
 
-static void uiWaitTouch(void)
+// Czekanie na dotyk albo BOOT. 0.1.1: slad w logu co 5 s (nacisk z XPT2046 - gdyby dotyk nie
+// dzialal, widac to od razu) i limit 3 min, po ktorym program sam wraca do K-OS. RST tez wraca
+// do K-OS (Model B), wiec plytka nigdy nie zostaje "zawieszona" na tym ekranie.
+static void uiWaitTouch(const char* why)
 {
     int x, y;
+    Serial.printf("EKRAN: %s - czekam na dotyk albo BOOT (RST tez wraca do K-OS)\n", why);
+    KosStage(why);
     // Najpierw puszczenie: dotyk, ktorym uruchomiono program w K-OS, nie moze od razu wyjsc.
     uint32_t t0 = millis();
     while ((InputRawTouch(&x, &y) > 350 || InputBootPressed()) && millis() - t0 < 3000) delay(20);
+    uint32_t lastLog = millis();
     for (;;) {
-        if (InputRawTouch(&x, &y) > 350 || InputBootPressed()) break;
+        int z = InputRawTouch(&x, &y);
+        if (z > 350) { Serial.printf("EKRAN: dotyk (z=%d x=%d y=%d) - powrot do K-OS\n", z, x, y); break; }
+        if (InputBootPressed()) { Serial.println("EKRAN: BOOT - powrot do K-OS"); break; }
+        if (millis() - lastLog >= 5000) {
+            lastLog = millis();
+            Serial.printf("EKRAN: nadal czekam (%u s), dotyk z=%d\n", (unsigned)((lastLog - t0) / 1000), z);
+        }
+        if (millis() - t0 > 180000) { Serial.println("EKRAN: 3 min bez dotyku - sam wracam do K-OS"); break; }
         delay(30);
     }
 }
@@ -271,14 +352,16 @@ static void uiWaitTouch(void)
 // Ekran konca drogi: komunikat i powrot do K-OS po dotyku. Nie wraca.
 static void uiFatal(const char* l1, const char* l2, const char* l3, const char* l4)
 {
+    Serial.printf("BLAD: %s | %s | %s | %s\n", l1, l2 ? l2 : "", l3 ? l3 : "", l4 ? l4 : "");
     uiBegin();
     uiCenter(18, 3, g_kos.acc, "DOOM");
     uiCenter(62, 2, g_kos.err, l1);
     if (l2) uiCenter(94, 1, g_kos.txt, l2);
     if (l3) uiCenter(110, 1, g_kos.txt, l3);
     if (l4) uiCenter(126, 1, g_kos.txt2, l4);
-    uiCenter(214, 1, g_kos.txt2, g_kos.en ? "Touch the screen to return to K-OS" : "Dotknij ekranu - powrot do K-OS");
-    uiWaitTouch();
+    uiCenter(214, 1, g_kos.txt2, g_kos.en ? "Touch the screen or BOOT to return to K-OS" : "Dotknij ekranu (albo BOOT) - powrot do K-OS");
+    uiText(4, 230, 1, g_kos.txt2, "v" KOS_DOOM_WERSJA);
+    uiWaitTouch(l1);
     KosExitToMenu();
 }
 
@@ -353,11 +436,14 @@ static int srcCheck(FILE* f, uint32_t size)
 static const char* copyToSlot(const esp_partition_t* run, uint32_t base, uint32_t cap,
                               const char* path, uint32_t srcSize, uint32_t srcMtime)
 {
+    KosStage("DANE: sprawdzanie pliku na karcie");
     FILE* f = fopen(path, "rb");
-    if (!f) return "nie moge otworzyc pliku";
+    if (!f) { Serial.printf("DANE: nie moge otworzyc %s\n", path); return "nie moge otworzyc pliku"; }
     const int sc = srcCheck(f, srcSize);
+    Serial.printf("DANE: plik %s, %u B: %s\n", path, (unsigned)srcSize,
+                  sc == SRC_OK ? "format KOSDOOM2 OK" : sc == SRC_OLD ? "STARY format" : "to nie plik z wad2kos.py");
     if (sc != SRC_OK) { fclose(f); return sc == SRC_OLD ? "STARY" : "KOSINFO"; }
-    if (srcSize > cap) { fclose(f); return "ZA_DUZY"; }
+    if (srcSize > cap) { fclose(f); Serial.printf("DANE: za duzy (%u > %u B)\n", (unsigned)srcSize, (unsigned)cap); return "ZA_DUZY"; }
     uint8_t* buf = (uint8_t*)malloc(4096);
     if (!buf) { fclose(f); return "brak pamieci na bufor 4 kB"; }
 
@@ -378,17 +464,25 @@ static const char* copyToSlot(const esp_partition_t* run, uint32_t base, uint32_
     const char* err = nullptr;
 
     uiCenter(140, 1, g_kos.txt, g_kos.en ? "erasing" : "kasowanie");
+    uint32_t tPhase = millis();
+    KosStage("DANE: kasowanie flasha");
+    Serial.printf("DANE: kasuje %u B od +0x%06x\n", (unsigned)eraseLen, (unsigned)base);
     for (uint32_t o = 0; o < eraseLen && !err; o += 65536) {
         uint32_t n = eraseLen - o < 65536 ? eraseLen - o : 65536;
-        if (esp_partition_erase_range(run, base + o, n) != ESP_OK) err = "kasowanie flasha nieudane";
+        esp_err_t ee = esp_partition_erase_range(run, base + o, n);
+        if (ee != ESP_OK) { err = "kasowanie flasha nieudane"; Serial.printf("DANE: kasowanie +0x%06x blad 0x%x\n", (unsigned)(base + o), (unsigned)ee); }
+        KosStageProgress(o + n, eraseLen);
         uiBar(160, o + n, eraseLen);
         vTaskDelay(1);   // kasowanie parkuje oba rdzenie - IDLE0 musi dostac czas, inaczej watchdog
     }
+    Serial.printf("DANE: kasowanie %s w %u ms\n", err ? "PRZERWANE" : "OK", (unsigned)(millis() - tPhase));
 
     uint32_t done = 0, crc = 0;
     if (!err) {
         DisplayFillRect(0, 140, 320, 10, g_kos.bg);
         uiCenter(140, 1, g_kos.txt, g_kos.en ? "copying" : "kopiowanie");
+        tPhase = millis();
+        KosStage("DANE: kopiowanie z karty");
         fseek(f, 0, SEEK_SET);
         size_t r;
         // Nie wiecej niz srcSize: plik, ktory urosl w trakcie kopii, nie moze pisac za skasowany zakres.
@@ -396,8 +490,10 @@ static const char* copyToSlot(const esp_partition_t* run, uint32_t base, uint32_
             if (esp_partition_write(run, base + KD_HDR_SECTOR + done, buf, r) != ESP_OK) { err = "zapis flasha nieudany"; break; }
             crc = esp_rom_crc32_le(crc, buf, r);
             done += r;
+            KosStageProgress(done, srcSize);
             if ((done & 0xFFFF) < 4096) { uiBar(160, done, srcSize); vTaskDelay(1); }
         }
+        Serial.printf("DANE: kopiowanie %u B w %u ms\n", (unsigned)done, (unsigned)(millis() - tPhase));
         if (!err && (ferror(f) || done != srcSize)) err = "blad odczytu karty";
         // Naglowek slotu nie zostanie zapisany, wiec uszkodzony plik nie udaje dobrych danych.
         if (!err && crc != KD_CRC_RESIDUE) err = "USZKODZONY";
@@ -408,6 +504,7 @@ static const char* copyToSlot(const esp_partition_t* run, uint32_t base, uint32_
     if (!err) {
         DisplayFillRect(0, 140, 320, 10, g_kos.bg);
         uiCenter(140, 1, g_kos.txt, g_kos.en ? "verifying" : "sprawdzanie");
+        KosStage("DANE: sprawdzanie flasha");
         uint32_t back = 0;
         if (!flashCrc(run, base + KD_HDR_SECTOR, srcSize, &back) || back != crc) err = "flash po zapisie inny niz plik";
     }
@@ -490,6 +587,8 @@ static void uiNoData(bool noCard, uint32_t cap)
         "4. Insert the card and start DOOM again.",
     };
     const char* const* t = g_kos.en ? en : pl;
+    Serial.printf("BLAD: %s - brak %s (DOOM szuka dokladnie tej sciezki na karcie)\n",
+                  noCard ? "brak karty SD" : "brak danych gry", KOS_DATA_PATH);
     uiBegin();
     uiCenter(8, 3, g_kos.acc, "DOOM");
     uiCenter(38, 2, g_kos.err, noCard ? (g_kos.en ? "No SD card" : "Brak karty SD")
@@ -499,9 +598,9 @@ static void uiNoData(bool noCard, uint32_t cap)
     char l[48];
     snprintf(l, sizeof(l), g_kos.en ? "space for data: %u kB" : "miejsce na dane: %u kB", (unsigned)(cap / 1024));
     uiCenter(190, 1, g_kos.txt2, l);
-    uiCenter(214, 1, g_kos.txt2, g_kos.en ? "Touch the screen to return to K-OS" : "Dotknij ekranu - powrot do K-OS");
+    uiCenter(214, 1, g_kos.txt2, g_kos.en ? "Touch the screen or BOOT to return to K-OS" : "Dotknij ekranu (albo BOOT) - powrot do K-OS");
     uiText(4, 230, 1, g_kos.txt2, "v" KOS_DOOM_WERSJA);
-    uiWaitTouch();
+    uiWaitTouch(noCard ? "ekran: brak karty SD" : "ekran: brak danych gry");
     KosExitToMenu();
 }
 
@@ -562,6 +661,10 @@ static void dataPrepare(void)
     // Plik na karcie jest zrodlem prawdy: inny rozmiar albo data = uzytkownik podmienil dane.
     // Bez pliku (karta wyjeta) gramy tym, co juz lezy w slocie.
     bool need = !dataOk || (src && (srcSize != h.srcSize || srcMtime != h.srcMtime));
+    Serial.printf("DANE: w slocie %s; na karcie %s (%u B); %s\n",
+                  dataOk ? "sa (CRC OK)" : hdrOk ? "USZKODZONE" : "brak",
+                  src ? KOS_DATA_PATH : !g_kos.sdOk ? "brak karty" : "brak pliku " KOS_DATA_PATH, (unsigned)srcSize,
+                  !need ? "gram na danych ze slotu" : src ? "kopiuje z karty" : "nie ma skad wziac danych");
     if (dataOk && !need) {
         const char* bad = dataCheck(run, base + KD_HDR_SECTOR, h.wadLen);
         if (bad) uiBadData(bad, cap);
@@ -583,6 +686,7 @@ static void dataPrepare(void)
                                    : !strcmp(err, "STARY") ? (g_kos.en ? "/doom/doom.kwad is from an older wad2kos.py" : "/doom/doom.kwad ze starszego wad2kos.py")
                                                            : (g_kos.en ? "/doom/doom.kwad is not from wad2kos.py" : "/doom/doom.kwad nie jest z wad2kos.py"));
         uiCenter(116, 1, g_kos.txt2, g_kos.en ? "playing with the installed data" : "gram na zainstalowanych danych");
+        Serial.printf("DANE: nowy plik odrzucony (%s) - gram na danych ze slotu\n", err);
         delay(3000);
         s_dataOff = base + KD_HDR_SECTOR; s_dataLen = h.wadLen;
         return;
@@ -598,6 +702,7 @@ static void dataPrepare(void)
     const char* bad = dataCheck(run, base + KD_HDR_SECTOR, srcSize);
     if (bad) uiBadData(bad, cap);
     s_dataOff = base + KD_HDR_SECTOR; s_dataLen = srcSize;
+    Serial.printf("DANE: zainstalowane, %u B\n", (unsigned)srcSize);
 }
 
 void KosDataWhere(uint32_t* offset, uint32_t* length)
@@ -683,13 +788,16 @@ void KosPrepare(void)
 {
     memset(&g_kos, 0, sizeof(g_kos));
     s_boot = true;
+    KosStage("karta SD");
     g_kos.sdOk = sdMount();
     Serial.printf("SD: %s\n", g_kos.sdOk ? "zamontowana" : "BRAK KARTY");
     settingsLoad();
     touchCalLoad();
+    ekranLoad();
     // Zapisy PRZED ekranami K-OS: w cieniu zapisow siedzi tez wynik kreatora (orientacja),
     // a ekran "instaluje dane" ma stac w tej samej orientacji co potem gra.
     SramInit();
+    KosStage("DANE: przygotowanie");
     dataPrepare();
 }
 
@@ -699,6 +807,7 @@ extern "C" void KosPrepareDone(void)
     s_boot = false;
     sdUnmount();
     uiEnd();
+    KosStage("silnik: Z_Init / R_Init / plansza");
     Serial.printf("sterta po K-OS: wolne %u B, najwiekszy blok %u B\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));

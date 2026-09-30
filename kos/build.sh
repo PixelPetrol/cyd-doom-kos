@@ -81,7 +81,7 @@ FQBN="esp32:esp32:esp32:PartitionScheme=huge_app,PSRAM=disabled,FlashSize=4M,CPU
 # Stale nazwy zamiast sciezek (przy okazji w obrazie nie ma nazwy konta ani katalogow autora)
 # i data z SOURCE_DATE_EPOCH (GCC bierze ja do __DATE__/__TIME__). Cudzyslowy w wartosci: sciezka
 # ma spacje, a arduino-cli dzieli przepis na argumenty z poszanowaniem cudzyslowow.
-export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1790380800}"     # 2026-09-26 00:00 UTC (0.1.0-beta)
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1790726400}"     # 2026-09-30 00:00 UTC (0.1.1-beta)
 DATA_DIR="$(arduino-cli config get directories.data 2>/dev/null || true)"
 [ -n "$DATA_DIR" ] || DATA_DIR="$HOME/Library/Arduino15"
 # Caly katalog repo (szkic posredni, katalog budowania, katalog roboczy kompilatora w DWARF),

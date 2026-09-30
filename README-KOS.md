@@ -5,12 +5,17 @@ Silnik DOOM (GBADoom / PrBoom) jako program **K-OS** na plytki ESP32 "Cheap Yell
 Port portu: [HenrysCat/cyd-doom](https://github.com/HenrysCat/cyd-doom) (commit `1c58bf4`),
 ktory opiera sie na [doomhack/GBADoom](https://github.com/doomhack/GBADoom), a ten na PrBoom.
 
-**Stan: BETA - obraz nie byl jeszcze uruchomiony na plytce.** Wszystko, co tu jest, zostalo
-zbudowane i sprawdzone testami na komputerze; pierwsze uruchomienie na sprzecie jest przed nami.
+**Stan: BETA 0.1.1.** Pierwsze uruchomienie 0.1.0 na plytce (cyd24, 30.09) pokazalo odbity obraz
+i minute ciszy w logu po starcie ekranu - 0.1.1 to poprawka tego startu (pelny init panelu jak
+w K-OS, sprawdzany MADCTL, `/doom/ekran.txt`, log kazdego etapu i kazdego czekania). Silnik
+z gotowym plikiem Freedoomu przechodzi na komputerze menu, Nowa gra i E1M1
+(`kos/tests/test_silnik_host.py`); gra do konca na plytce jest jeszcze przed nami.
 
 **Dane gry nie sa dolaczone.** Program potrzebuje pliku `/doom/doom.kwad` na karcie SD, ktory
 uzytkownik robi sam z `freedoom1.wad` (Freedoom, darmowy) albo z wlasnego `doom1.wad` / `doom.wad`
 narzedziem `kos/wad2kos.py` - instrukcja krok po kroku: [kos/INSTRUKCJA.md](kos/INSTRUKCJA.md).
+Gotowy `doom.kwad` z Freedoomu 0.13.0 (plansza E1M1, BSD-3-Clause) jest przygotowany do sklepu
+K-OS jako osobny plik do pobrania (poza tym repozytorium; `kos/STAN-PRAC.md`, etap 9).
 
 DOOM jest znakiem towarowym id Software. To nieoficjalny port silnika, niezwiazany z id Software.
 
@@ -20,7 +25,7 @@ DOOM jest znakiem towarowym id Software. To nieoficjalny port silnika, niezwiaza
   Upstream wgrywal sie od `0x0` z wlasna tablica partycji - pod K-OS tak nie wolno.
 * Dane gry leza w **ogonie wlasnego slotu**, za obrazem silnika (od +0xA0000, 1852 kB).
   Ladowarka K-OS kasuje przed kopiowaniem programu tylko dlugosc obrazu, wiec ogon przezywa.
-  Program kopiuje `/doom/doom.kwad` z karty do ogona przy pierwszym starcie (~10 s) i za kazdym
+  Program kopiuje `/doom/doom.kwad` z karty do ogona przy pierwszym starcie (do ~30 s) i za kazdym
   razem, gdy ktos ogon zamazal albo plik na karcie sie zmienil.
 * Zapisy gry ida na karte (`/doom/zapisy.sav`), dotyk, jasnosc, kolory i jezyk - z ustawien K-OS.
 
@@ -31,6 +36,7 @@ arduino-cli core update-index
 arduino-cli core install esp32:esp32@3.3.11
 ./kos/build.sh all          # kos/bin/cyd24|cyd28|cyd28s/doom.bin + rozmiary i SHA-256
 python3 kos/tests/test_wad2kos.py
+DOOM_KWAD=/sciezka/doom.kwad python3 kos/tests/test_silnik_host.py   # silnik na komputerze
 ```
 
 Port nie uzywa bibliotek Arduino (ekran, dotyk, karta - przez ESP-IDF z rdzenia). `build.sh`
@@ -64,17 +70,18 @@ Kazdy zmieniony plik upstreamu ma w pierwszej linii naglowek "Zmienione dla K-OS
 | `src/port/main.cpp` | Model B na starcie `setup()`, przygotowanie K-OS (karta, dane w ogonie slotu) przed `Z_Init` |
 | `src/port/wad_mmap.c` | mapowanie ogona biegnacej partycji zamiast partycji `wad` |
 | `src/port/sram.c` | zapisy gry i ustawienia kreatora w `/sd/doom/zapisy.sav` zamiast sektora flasha |
-| `src/port/display.cpp` | MADCTL, INVON/INVOFF i pin podswietlenia z profilu plytki K-OS; ekrany K-OS (napisy 5x7), ekran bledu zamiast pustego `DisplayDrawText`, zwolnienie ekranu przed silnikiem |
-| `src/port/input.cpp` | dotyk XPT2046 jak w K-OS (2.8": bit-bang, 2.4": `spi_master` na magistrali ekranu), kalibracja K-OS przeliczona na poziom |
+| `src/port/display.cpp` | pelny init panelu jak TFT_eSPI w K-OS (ILI9341_2 / ST7789), MADCTL = rotacja 1 K-OS (sprawdzany odczytem po tescie predkosci SPI; nadpisanie z `/doom/ekran.txt`), INVON/INVOFF i pin podswietlenia z profilu plytki; ekrany K-OS (napisy 5x7), ekran bledu zamiast pustego `DisplayDrawText`, zwolnienie ekranu przed silnikiem, oczekiwanie na DMA z limitem |
+| `src/port/input.cpp` | dotyk XPT2046 jak w K-OS (2.8": bit-bang, 2.4": `spi_master` na magistrali ekranu), kalibracja K-OS przeliczona na poziom i odbita razem z obrazem |
 | `src/port/setup.cpp` | kreator ekranu tylko awaryjnie (BOOT przy starcie) |
-| `src/port/i_system_esp32.cpp` | `I_Error` na ekranie, dotyk/BOOT wraca do K-OS (upstream: wieczna petla) |
+| `src/port/i_system_esp32.cpp` | `I_Error` na ekranie, dotyk/BOOT wraca do K-OS (upstream: wieczna petla); koniec logu etapow na pierwszej klatce |
 | `src/port/doomport.h` | deklaracje nowych funkcji ekranu i dotyku |
 
 Nowe pliki: `src/port/kos.cpp`, `kos.h` (warstwa K-OS: karta, ustawienia, kalibracja, kopia danych
 do slotu z CRC, sprawdzenie katalogu lumpow, ekrany "brak danych", zapisy), `kos_font.h`,
 `safewrite.cpp/.h` (bezpieczny zapis pliku `.part` -> `.bak` -> podmiana), `kos/build.sh`,
 `kos/wad2kos.py` (zamiennik `GbaWadUtil.exe`: przerobka GBA + przycinanie + pasek stanu),
-`kos/tests/test_wad2kos.py`, `kos/INSTRUKCJA.md`, `kos/PUBLIKACJA.md`, `kos/sprawdz_publikacje.py`.
+`kos/tests/test_wad2kos.py`, `kos/tests/test_silnik_host.py` + `kos/tests/silnik_host.c` (silnik na komputerze
+z prawdziwym `.kwad`), `kos/INSTRUKCJA.md`, `kos/PUBLIKACJA.md`, `kos/sprawdz_publikacje.py`.
 
 Usuniete z upstreamu:
 
@@ -88,7 +95,14 @@ Usuniete z upstreamu:
 
 ## Znane ograniczenia
 
-* Tylko epizod 1 i tylko tyle plansz, ile zmiesci sie w 1852 kB (zwykle 2-4; `wad2kos.py --budzet`).
+* Tylko epizod 1 i tylko tyle plansz, ile zmiesci sie w 1852 kB (`wad2kos.py --budzet`).
+  Freedoom 0.13.0 ma duzo wieksza grafike niz DOOM: sama E1M1 z pelna grafika to 2,7 MB, wiec
+  miesci sie tylko E1M1 i to z `--polowa wszystko` (latki scian i sprite'y w polowie rozdzielczosci
+  poziomej: kolumna 2k+1 pokazuje dane kolumny 2k; silnik i tak rysuje 120 kolumn na 240 px).
+  `wad2kos.py` wybiera ten poziom sam (`--polowa auto`), gdy bez niego nie wchodzi nawet E1M1.
+* Orientacja obrazu: domyslnie taka jak poziome programy K-OS (rotacja 1 TFT_eSPI). Gdyby na
+  jakims egzemplarzu wyszla odbita - `/doom/ekran.txt` z `madctl=0x..` (`kos/INSTRUKCJA.md`) albo
+  kreator (BOOT trzymany przy starcie DOOM).
 * Bez dzwieku (upstream tez go nie ma). Tlo przerywnika i ekrany konca epizodu sa czarne.
 * Pasek stanu bez tabeli amunicji BULL/SHEL/RCKT/CELL; biezaca amunicja - duzy licznik AMMO.
 * Freedoom: jego `DEHACKED` (teksty, nazwy map w automapie) nie jest stosowany - silnik go nie czyta.
@@ -97,5 +111,7 @@ Usuniete z upstreamu:
 * Silnik, tak jak oryginalny DOOM, wierzy danym map i grafiki. `wad2kos.py` sprawdza ich budowe,
   a program na plytce - katalog, wyrownanie, CRC i pasek stanu; plik `.kwad` zrobiony recznie
   z pominieciem `wad2kos.py` moze wywrocic silnik (restart do menu K-OS, bez szkody dla plytki).
-* Silnik ma stale limity (visplanes, drawsegs) i ~110 kB strefy - bardzo duze mapy Freedoomu moga
-  sie nie zmiescic w pamieci; pierwszy start na plytce to pokaze (komunikat na ekranie).
+* Silnik ma ~110 kB strefy - bardzo duze mapy moga sie nie zmiescic w pamieci; pierwszy start na
+  plytce to pokaze (komunikat na ekranie). Visplanes sa przydzielane ze strefy (bez stalego limitu),
+  a przepelnienie drawsegs (192) / vissprites (96) / openings silnik bez `RANGECHECK` tylko
+  przycina (brakujace sciany/sprite'y w danej klatce), nie zatrzymuje gry.
